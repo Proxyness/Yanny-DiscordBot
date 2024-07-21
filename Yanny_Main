@@ -103,6 +103,7 @@ async def post_wikipedia_article():
 
     await channel.send(f"Here's a random Wikipedia article for you to check out: {article_url}\n\n{random.choice(opinion)}")
 
+# Say Something function
 async def say_something():
     print("Entering say_something function")
     await reset_inactivity_timer()
