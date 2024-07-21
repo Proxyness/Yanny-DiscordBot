@@ -1,0 +1,351 @@
+import os
+import random
+import discord
+from discord.ext import commands, tasks
+import datetime
+import asyncio
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Global Constants
+CHANNEL_ID = Secret
+Dev_ID = Secret
+scryfall_api_url = "https://api.scryfall.com/cards/named?fuzzy="
+
+# Discord bot setup
+intents = discord.Intents.all()
+client = commands.Bot(command_prefix='~', intents=intents, case_insensitive=True)
+client.remove_command('help')
+
+# Timers and tasks
+inactivity_timer = None
+quotecheck = False
+
+# Helper functions
+async def reset_inactivity_timer(seconds=None):
+    global inactivity_timer
+    if inactivity_timer:
+        inactivity_timer.cancel()
+
+    if seconds is None:
+        seconds = random.randint(3600, 10800)  # Random period between 1 to 3 hours
+
+    inactivity_timer = asyncio.create_task(inactivity_countdown(seconds))
+    print(f"New inactivity timer set for {seconds} seconds")
+
+async def inactivity_countdown(duration):
+    try:
+        await asyncio.sleep(duration)
+        now = datetime.datetime.now().time()
+        if not (0 <= now.hour < 8):  # Exclude midnight to 8 AM
+            await entertain_bot()
+        else:
+            print("Boredom action skipped due to time restrictions")
+    except asyncio.CancelledError:
+        pass
+
+async def entertain_bot():
+    print("Entering entertain_bot function")
+    actions = [post_wikipedia_article, say_something]
+    action = random.choice(actions)
+    print(f"Selected action: {action.__name__}")
+    await action()
+
+# Wikipedia functions
+async def post_wikipedia_article():
+    print("Entering post_wikipedia_article function")
+    channel = client.get_channel(CHANNEL_ID)
+    if not channel:
+        print("Channel not found")
+        return
+
+    session = requests.Session()
+    retry = Retry(
+        total=5,  # Number of retries
+        backoff_factor=1,  # Time between retries
+        status_forcelist=[429, 500, 502, 503, 504],  # Retry on these status codes
+        allowed_methods=["HEAD", "GET", "OPTIONS"]  # Correct argument name
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+    try:
+        response = session.get("https://en.wikipedia.org/w/api.php?action=query&list=random&rnnamespace=0&rnlimit=1&format=json")
+        response.raise_for_status()  # Raise an error on bad status
+        data = response.json()
+        article_title = data['query']['random'][0]['title']
+        print(f"Selected article: {article_title}")
+
+        page_response = session.get(f"https://en.wikipedia.org/w/api.php?action=query&prop=info&pageids={data['query']['random'][0]['id']}&inprop=url&format=json")
+        page_response.raise_for_status()  # Raise an error on bad status
+        page_data = page_response.json()
+        article_url = page_data['query']['pages'][str(data['query']['random'][0]['id'])]['fullurl']
+        print(f"Article URL: {article_url}")
+
+    except requests.RequestException as e:
+        print(f"RequestException in post_wikipedia_article: {e}")
+        await say_something()
+        return
+    except Exception as e:
+        print(f"Exception in post_wikipedia_article: {e}")
+        await say_something()
+        return
+
+    opinion = [
+        "I didn't understand half of it 😩", "It was such a fascinating read!!!",
+        "This might be my new hobby!", "I just read about it but I think I know less now!"
+    ]
+
+    await channel.send(f"Here's a random Wikipedia article for you to check out: {article_url}\n\n{random.choice(opinion)}")
+
+async def say_something():
+    print("Entering say_something function")
+    await reset_inactivity_timer()
+
+    try:
+        with open('Say_Something.txt', 'r', encoding='utf-8') as file:
+            messages = file.readlines()
+        
+        if not messages:
+            print("No messages found in Say_Something.txt")
+            return
+
+        message = random.choice(messages).strip()  # Choose a random message and strip newline
+
+        channel = client.get_channel(CHANNEL_ID)
+
+        print(f"Channel: {channel}")
+        print(f"Message: {message}")
+
+        if channel:
+            await channel.send(message)
+            print(f"Message '{message}' was sent")
+        else:
+            print("Channel not found in say_something function")
+
+    except FileNotFoundError:
+        print("Say_Something.txt not found")
+    except Exception as e:
+        print(f"Error reading Say_Something.txt: {e}")
+
+# Commands and event handlers
+@client.event
+async def on_ready():
+    print(f'{client.user} has connected to Discord!')
+    daily_quote.start()
+    await reset_inactivity_timer()
+    user = client.get_user(Dev_ID)
+    if user:
+        try:
+            await user.send("Hello! I'm now online.")
+            print(f"Sent a DM to {user.name}")
+        except discord.Forbidden:
+            print(f"Cannot send a DM to {user.name}")
+
+##Time translator##
+def parse_time(time_str):
+    try:
+        amount = int(time_str[:-1])
+        unit = time_str[-1]
+
+        if unit == 's':
+            return amount
+        elif unit == 'm':
+            return amount * 60
+        elif unit == 'h':
+            return amount * 60 * 60
+        elif unit == 'd':
+            return amount * 60 * 60 * 24
+        else:
+            return None
+    except:
+        return None
+
+@client.event
+async def on_message(ctx):
+    if ctx.author.id == client.user.id:
+        await reset_inactivity_timer()
+    await client.process_commands(ctx)
+
+##Daily Quote##
+@tasks.loop(minutes=5)
+async def daily_quote():
+    global quotecheck
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    if now.hour == 22 and not quotecheck:
+        try:
+            with open('quotes.txt', 'r') as file:
+                quotes = file.readlines()
+                quotes = [quote.strip() for quote in quotes]
+                quote = random.choice(quotes)
+                channel = client.get_channel(CHANNEL_ID)
+                if channel:
+                    await channel.send(f"DAILY AFFIRMATION TIME!\n\n{quote}\n\nHave a great day everyone!")
+                quotecheck = True
+            # Close the file explicitly after reading quotes
+            file.close()
+        except Exception as e:
+            print(f"Error reading quotes file: {e}")
+    elif now.hour != 22 and quotecheck:
+        quotecheck = False
+
+@daily_quote.before_loop
+async def before_daily_quote():
+    await client.wait_until_ready()
+##Daily Quote Ends##
+
+##Commands from here##
+##cheer##
+@client.command(aliases=['c'], pass_context=True)
+async def cheer(ctx, person:discord.Member=None):
+    username = str(ctx.message.author).split('#')[0]
+    user_message = str(ctx.message.content)
+    channel = str(ctx.message.channel.name)
+    if person is None:
+        person = ctx.author
+    cheer_messages = ['You got this ', 'You can do this ', "I'm cheering for you ", 'Go ']
+    await ctx.send(f'{random.choice(cheer_messages)}{person.mention}!')
+    print(f'{username}: {user_message} ({channel})')
+##cheer ends##
+
+##Eight-Ball##
+@client.command(aliases=['8ball', '8b'], pass_context=True)
+async def eightball(ctx, *, question):
+	username = str(ctx.message.author).split('#')[0]
+	user_message = str(ctx.message.content)
+	channel = str(ctx.message.channel.name)
+	print(f'{username}: {user_message} ({channel})')
+	responses = ["It is certain.", "It is decidedly so.", "Without a doubt.", "Yes - definitely.",
+            	"You may rely on it.", "As I see it, yes.", "Most likely.", "Outlook good.",
+            	"Yes.", "Signs point to yes.", "Reply hazy, try watching Anime instead.",
+            	"Ask again later.", "Better not tell you now.", "Cannot predict now.", "Concentrate and ask again.",
+            	"Don't count on it.", "My reply is no.", "My sources say no.", "Outlook not so good.",
+            	"Very doubtful.", "My guess is that you're fucked."]
+	await ctx.send(f':8ball:: {question}\n:8ball:: {random.choice(responses)}')
+##Eight-Ball ends##
+
+##Rock Paper Scissors##
+@client.command(aliases=['rsp', 'spr', 'srp', 'psr', 'prs'], pass_context=True)
+async def rps(ctx, choice: str):
+    choices = ['rock', 'paper', 'scissors']
+    bot_choice = random.choice(choices)
+    username = str(ctx.message.author).split('#')[0]
+    user_message = str(ctx.message.content)
+    channel = str(ctx.message.channel.name)
+    print(f'{username}: {user_message} ({channel})')
+    if choice not in choices:
+        return await ctx.send("Invalid choice. Please choose rock, paper, or scissors.")
+    
+    if choice == bot_choice:
+        await ctx.send(f"It's a tie! We both chose {choice}.")
+    elif (choice == 'rock' and bot_choice == 'scissors') or (choice == 'paper' and bot_choice == 'rock') or (choice == 'scissors' and bot_choice == 'paper'):
+        await ctx.send(f"You win! I chose {bot_choice}.")
+    else:
+        await ctx.send(f"You lose! I chose {bot_choice}.")
+##Rock Paper Scissors ends##
+
+##Remind Me##
+@client.command(aliases=['remindme', 'remind'])
+async def remind_me(ctx, time: str, *, message: str = 'you asked me to remind you'):
+    delay = parse_time(time)
+    
+    if delay is None:
+        await ctx.send("Invalid time format. Use 's' for seconds, 'm' for minutes, 'h' for hours, or 'd' for days.")
+        return
+    
+    await ctx.send(f"Okay {ctx.author.mention}, I will remind you in {time}.")
+    
+    await asyncio.sleep(delay)
+    
+    await ctx.send(f"{ctx.author.mention}, you asked me to remind you: {message}")
+##Remind Me Ends##
+
+##Coin Flip##
+@client.command(aliases=['flip', 'cf'], pass_context=True)
+async def coinflip(ctx):
+    outcomes = ['heads', 'tails']
+    username = str(ctx.message.author).split('#')[0]
+    user_message = str(ctx.message.content)
+    channel = str(ctx.message.channel.name)
+    print(f'{username}: {user_message} ({channel})')
+    result = random.choice(outcomes)
+    await ctx.send(f"The coin landed on {result}!")
+##Coin Flip ends##
+
+##Rich Meme##
+@client.command(aliases=['makerich','rich', 'stocks', 'invest', 'stonks', 'makeprofit', 'profit', 'investandmakeprofit', 'money', 'cash', 'cashcashmoney'])
+async def makemoney(ctx):
+    cashmeme = ["Stay broke", "https://i.kym-cdn.com/entries/icons/original/000/029/959/Screen_Shot_2019-06-05_at_1.26.32_PM.jpg", "https://i.ytimg.com/vi/SMRg9mKcyhM/mqdefault.jpg", 
+                "https://www.idlememe.com/wp-content/uploads/2022/08/stonks-meme-idlememe-2.jpg", "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQ6h_37NBIvfYC1YTwffB2cgT_f2zoyEym3Jw&s", 
+                "https://www.sidehustlenation.com/wp-content/uploads/2022/05/making-money-memes-3.jpg", "https://images7.memedroid.com/images/UPLOADED786/603ece59ae27e.jpeg", 
+                "https://wise.com/imaginary/90de9901f464b821dd4e5b407dfd442d.jpg"]
+    memeprint = random.choice(cashmeme)
+    await ctx.send(f"{memeprint}")
+##Rich Meme Ends##
+
+@client.command(name='help', pass_context=True)
+async def help(ctx):
+    help_message = """
+**Here are the available commands:**
+
+**General Commands:**
+`~help` - Displays this help message.
+`~cheer [@user]` or `~c [@user]` - Sends a cheering message. If no user is mentioned, it cheers for the command user.
+`~8ball [question]` or `~8b [question]` - Asks the Magic 8 Ball a question.
+`~rps [rock/paper/scissors]` - Plays a game of Rock, Paper, Scissors.
+`~coinflip` or `~cf` - Flips a coin.
+`~remindme [time][s/m/h/d] [optional message]` - Asks Yanny to tag you with a reminder after a certain amount of time passes.
+`~makemoney` - Yanny will provide investment information and guides to making money.
+
+**MtG Card Lookup**
+To get Yanny to display card information, use double square brackets like so [[Card Name]]
+
+**Other Information:**
+- The bot will entertain itself after periods of inactivity (between 1 to 3 hours, except from midnight to 8 AM).
+- The bot will automatically post a daily quote around 8 AM AEST.
+"""
+    await ctx.send(help_message)
+
+@client.command(name='test_boredom', aliases=['bored','testbored'])
+async def test_boredom(ctx):
+    if ctx.author.id == Dev_ID:
+        print("Manually triggering entertain_bot function via command")
+        await entertain_bot()
+        await ctx.send("Boredom action triggered manually")
+    else:
+        await ctx.send("You do not have permission to use this command.")
+
+@client.command(name='test_wiki', aliases=['wiki','testwiki'])
+async def test_wiki(ctx):
+    if ctx.author.id == Dev_ID:
+        print("Manually triggering post_wikipedia_article function via command")
+        await post_wikipedia_article()
+        await ctx.send("Wiki action triggered manually")
+    else:
+        await ctx.send("You do not have permission to use this command.")
+
+@client.command(name='test_say', aliases=['say', 'testsay'])
+async def test_say(ctx):
+    if ctx.author.id == Dev_ID:
+        print("Manually triggering say_something function via command")
+        await say_something()
+        await ctx.send("Say Something action triggered manually")
+    else:
+        await ctx.send("You do not have permission to use this command.")
+
+@client.command(name='test_timer', aliases=['timer', 'testtimer'])
+async def test_timer(ctx, seconds: int):
+    if ctx.author.id == Dev_ID:
+        await reset_inactivity_timer(seconds)
+        await ctx.send(f"Inactivity timer manually set to {seconds} seconds")
+    else:
+        await ctx.send("You do not have permission to use this command.")
+
+# Run the bot
+client.run('Secret')
